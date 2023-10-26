@@ -2,19 +2,20 @@ import discord
 import asyncio
 import aiohttp
 import os
+import io
 import datetime
+
 from ninfs.mount.exefs import ExeFSReader
 
 from cleaninty.ctr.simpledevice import SimpleCtrDevice
 from cleaninty.ctr.soap.manager import CtrSoapManager
 from cleaninty.ctr.soap import helpers, ias
 
-
-async def checkReg(console):
-    device = SimpleCtrDevice(json_file=console)
+async def checkRegfp(console):
+    device = SimpleCtrDevice(json_fp=console)
     soap_device = CtrSoapManager(device, False)
     helpers.CtrSoapCheckRegister(soap_device)
-    device.serialize_json(json_file=console)
+    device.serialize_json(json_fp=console)
     print(f"region: {soap_device.region} country: {soap_device.country}")
     return [soap_device.country, soap_device.region]
 
@@ -60,14 +61,14 @@ def _run_unregister(device, soap_device):
 
 async def eshopRegionChange(console, region, country):
     print("Initializing console...")
-    device = SimpleCtrDevice(json_file=console)
+    device = SimpleCtrDevice(json_fp=console)
     soap_device = CtrSoapManager(device, False)
 
     print("Checking registry...")
     helpers.CtrSoapCheckRegister(soap_device)
 
     print("Saving updated session...")
-    device.serialize_json(json_file=console)
+    device.serialize_json(json_fp=console)
 
     # if region == soap_device.region and soap_device.account_status != 'U': impossible
     #	print("Console already in the desired region.")
@@ -110,11 +111,11 @@ async def eshopRegionChange(console, region, country):
 
 async def _move_account(source_console, target_console):
 	print("Initializing source console...")
-	source = SimpleCtrDevice(json_file=source_console)
+	source = SimpleCtrDevice(json_fp=source_console)
 	soap_source = CtrSoapManager(source, False)
 
 	print("Initializing target console...")
-	target = SimpleCtrDevice(json_file=target_console)
+	target = SimpleCtrDevice(json_fp=target_console)
 	soap_target = CtrSoapManager(target, False)
 
 	helpers.CtrSoapUseSystemApps(soap_source, helpers.SysApps.SYSTRANSFER)
@@ -125,8 +126,8 @@ async def _move_account(source_console, target_console):
 	helpers.CtrSoapSessionConnect(soap_target)
 
 	print("Saving updated sessions...")
-	source.serialize_json(json_file=source)
-	target.serialize_json(json_file=target)
+	source.serialize_json(json_fp=source)
+	target.serialize_json(json_fp=target)
 
 	print("Checking if we can move account...")
 	movestatus = ias.MoveAccount(
@@ -265,6 +266,7 @@ def initDatabase():
         donorentry = f"{donors[i]} {lastmoved}\n"
         db.seek(seekcount)
         db.write(donorentry)
+        print(f"Initialized {donors[i]}")
         seekcount = seekcount + len(donorentry)
     db.close()
     print("Done!")
@@ -318,8 +320,8 @@ async def updateDonor(donor):
         markAsNotbusy(donor)
 
 async def confirmCountryMatch(target, donor):
-    donorlocale = await CheckReg(donor)
-    targetlocale = await CheckReg(target)
+    donorlocale = await CheckRegfp(donor)
+    targetlocale = await CheckRegfp(target)
     if targetlocale != donorlocale:
         await _del_eshop(donor)
         erchangeresult = await eshopRegionChange(donor, targetlocale[1], targetlocale[0])
@@ -398,17 +400,17 @@ async def on_message(message):
             return
         progress = "[ ]Generated JSON\n[ ]CheckReg Success\n[ ]EShopRegionChange\n[ ]SysTransfer"
         progressmessage = await message.channel.send("[ ]Generated JSON\n[ ]CheckReg\n[ ]EShopRegionChange\n[ ]SysTransfer")
-        donorjson = open("console.json", "w")
-        SimpleCtrDevice.generate_new_json(otp_fp=otp, secureinfo_fp=secinfo, country=genjsoncountry, json_file="console.json")
+        jsonfp = io.BytesIO()
+        SimpleCtrDevice.generate_new_json(otp_fp=otp, secureinfo_fp=secinfo, country=genjsoncountry, json_fp=jsonfp)
         otp.close()
         secinfo.close()    
         progress.replace("[ ]G", "[S]G")
         await progressmessage.edit(progress)
-        checkregresult = await CheckReg("console.json")
+        checkregresult = await CheckRegfp(jsonfp)
         if checkregresult[1] != "USA":
-            erchangeresult = await eshopRegionChange("console.json", "USA", "US")
+            erchangeresult = await eshopRegionChange(jsonfp, "USA", "US")
         else:
-            erchangeresult = await eshopRegionChange("console.json", "EUR", "GB")
+            erchangeresult = await eshopRegionChange(jsonfp, "EUR", "GB")
         if erchangeresult == 0:
             progress.replace("[ ]E", "[S]E")
             print("EShopRegionChange success!")
@@ -424,9 +426,12 @@ async def on_message(message):
             print(f"EShopRegionChange failure! Soap error code: {erchangeresult}")
             return
         thedonor = getReadyDonor()
+        donorfp = open(thedonor, "rb")
         markAsBusy(thedonor)
-        await confirmCountryMatch("console.json", thedonor)
-        systransferresult = await _move_account("console.json", thedonor)
+        await confirmCountryMatch(jsonfp, donorfp)
+        systransferresult = await _move_account(jsonfp, donorfp)
+        donorfp.close()
+        jsonfp.close()
         if systransferresult == 0:
             progress.replace("[ ]S", "[S]S")
             print("SysTransfer success")
