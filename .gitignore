@@ -1,3 +1,6 @@
 donors/*
 db.txt
 serialblacklist.txt
+.venv
+__pycache__
+token.txt

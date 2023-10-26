@@ -1,14 +1,16 @@
 import discord
-import requests
+import asyncio
+import aiohttp
 import os
 import datetime
+from ninfs.mount.exefs import ExeFSReader
 
 from cleaninty.ctr.simpledevice import SimpleCtrDevice
 from cleaninty.ctr.soap.manager import CtrSoapManager
 from cleaninty.ctr.soap import helpers, ias
 
 
-def checkReg(console):
+async def checkReg(console):
     device = SimpleCtrDevice(json_file=console)
     soap_device = CtrSoapManager(device, False)
     helpers.CtrSoapCheckRegister(soap_device)
@@ -56,7 +58,7 @@ def _run_unregister(device, soap_device):
 		else:
 			print("Unregistered!")
 
-def EShopRegionChange(console, region, country):
+async def eshopRegionChange(console, region, country):
     print("Initializing console...")
     device = SimpleCtrDevice(json_file=console)
     soap_device = CtrSoapManager(device, False)
@@ -106,7 +108,7 @@ def EShopRegionChange(console, region, country):
     print("Complete!")
     return 0
 
-def _move_account(source_console, target_console):
+async def _move_account(source_console, target_console):
 	print("Initializing source console...")
 	source = SimpleCtrDevice(json_file=source_console)
 	soap_source = CtrSoapManager(source, False)
@@ -146,7 +148,7 @@ def _move_account(source_console, target_console):
 
 	print("Complete!")
 
-def _del_eshop(console):
+async def _del_eshop(console):
 	print("Initializing console...")
 	device = SimpleCtrDevice(json_file=console)
 	soap_device = CtrSoapManager(device, False)
@@ -183,6 +185,7 @@ def checkSerialblacklist(serial):
         for x in f:
             if serial == x:
                 return True
+    return False
 
 def validSerial(serial, checkdigit):
     if not checkdigit:
@@ -223,16 +226,6 @@ def getCountry(region):
     if region == 'T':
         return "HK"
     return 0
-
-def cleanup():
-    try:
-        os.remove("essential.exefs")
-    except Exception:
-        pass
-    try:
-        os.remove("otp.bin")
-    except Exception:
-        pass
 
 def getDonorCooldown(console):
     device = SimpleCtrDevice(json_file=console)
@@ -276,6 +269,26 @@ def initDatabase():
     db.close()
     print("Done!")
 
+def isBusy(donor):
+    busy = open("busy.txt", "r")
+    busydonors = busy.read().splitlines()
+    busy.close()
+    if donor in busydonors:
+        return True
+    return False
+    
+def markAsBusy(donor):
+    busy = open("busy.txt", "w")
+    busy.seek(0, 2)
+    busy.write(f"{donor}\n")
+    busy.close()
+
+def markAsNotbusy():
+    busy = open("busy.txt", "r+")
+    busydonors = busy.read()
+    busydonors.replace(f"{donor}\n", "")
+    busy.close()
+
 def getReadyDonor():
     db = open("db.txt", "r")
     content = db.read()
@@ -283,10 +296,11 @@ def getReadyDonor():
     for i in range(len(donors)):
         donorlastmoved = donors[i].split()[1]
         currenttime = datetime.datetime.now().strftime("%Y-%b-%d")
-        if currenttime - datetime.timedelta(days=7) > donorlastmoved:
+        if currenttime - datetime.timedelta(days=7) > donorlastmoved and not isBusy(donors[i]):
+            markAsBusy(donors[i])
             return f"donors/{donors[i]}"
          
-def updateDonor(donor):
+async def updateDonor(donor):
     offset = 0
     db = open("db.txt", "r") # find donor
     content = db.read()
@@ -301,22 +315,20 @@ def updateDonor(donor):
             db.close()
             return
         offset = offset + len(donors[i])+1
-    
-def confirmCountryMatch(target, donor):
-    donorlocale = CheckReg(donor)
-    targetlocale = CheckReg(target)
+        markAsNotbusy(donor)
+
+async def confirmCountryMatch(target, donor):
+    donorlocale = await CheckReg(donor)
+    targetlocale = await CheckReg(target)
     if targetlocale != donorlocale:
-        _del_eshop(donor)
-        erchangeresult = EShopRegionChange(donor, targetlocale[1], targetlocale[0])
+        await _del_eshop(donor)
+        erchangeresult = await eshopRegionChange(donor, targetlocale[1], targetlocale[0])
         
         if erchangeresult == 0:
             return 0
         else:
-            print(f"EShopRegionChange on donor failed. Make sure you put a fixed donor inside. Faulty donor: {donor} Soap error if not 1: {erchangeresult}")
+            print(f"eshopRegionChange on donor failed. Make sure you put a fixed donor inside. Faulty donor: {donor} Soap error if not 1: {erchangeresult}")
             return 1
-        
-    
-
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -340,83 +352,63 @@ async def on_message(message):
         if len(argv) == 1: 
             return
         if argv[1] == "--help": 
-            await message.channel.send('usage: -soap <link to essential> <serial>\nspecial: \n-soap <link to essential> --force | ignores given serial\n-soap <link to otp> <serial> --otp | uses otp instead of essential')
+            await message.channel.send('Usage: -soap <link to essential> <serial>\nspecial: \n-soap <link to essential> --force | ignores given serial')
             return
         if not argv[1].startswith('https'):
-            await message.channel.send('invalid syntax :(')
+            await message.channel.send("invalid syntax(link doesn't start with https)")
             return
         if validSerial(argv[2], True) == 1:
-            await message.channel.send(f'invalid serial: {argv[2]}')
+            await message.channel.send(f'Invalid Serial number: {argv[2]}')
             return
         elif validSerial(argv[2], True) == 2:
-            await message.channel.send(f'blacklisted serial(maybe lazed?): {argv[2]}')
+            await message.channel.send(f'Blacklisted Serial number: {argv[2]}')
             return
         elif argv[2] == "--force":
             ignoreserialgiven = True
-        if len(argv) == 4:
-            if argv[3] == "--otp":
-                ignoresecinfoserial = True
-                useotp = True
-        download = requests.get(argv[1])
-        if download.status_code != 200:
-            await message.channel.send(f"Bad link, returned {download.status_code}")
+        if len(argv) > 3:
+            await message.channel.send(f'Too many arguements: {len(argv)}')
             return
-        if not useotp:
-            essentialfp = open("essential.exefs", 'wb')
-            essentialfp.write(essential.content)
-            exefs = ExeFSReader(essentialfp)
-            otp = exefs.open("otp.bin")
-            secinfo = exefs.open("secinfo.bin")
-            essentialfp.close()
-        else: 
-            otp = open("otp.bin", "wb")
-            otp.write(download.content)
-        if not ignoresecinfoserial:
-            secinfo.seek(102)
-            secinfoserial = secinfo.read(0xF).decode("ascii")
-            secinfo.seek(0)
-            if argv[2][(len(argv[2])-1):] != secinfoserial and not ignoreserialgiven:
-                await message.channel.send(f"Serials dont match! {argv[2][(len(argv[2])-1):]} not {secinfoserial}")
-                cleanup()
-                return
-            if ignoreserialgiven:
-                if validSerial(secinfoserial, False) == 2:
-                    await message.channel.send(f"blacklisted serial")
-                    cleanup()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(argv[1]) as download:
+                if download.status != 200:
+                    await message.channel.send(f"Bad link, returned {download.status}")
                     return
-            genjsoncountry = getCountry(argv[2][1])
-            if genjsoncountry == 0:
-                await message.channel.send(f"unknown serial: {argv[2]}")
+                downloadcontent = download.read()
+        
+        exefs = ExeFSReader(downloadcontent)
+        otp = exefs.open("otp.bin")
+        secinfo = exefs.open("secinfo.bin")
+        essentialfp.close()
+        secinfo.seek(0x102)
+        secinfoserial = secinfo.read(0xF).decode("ascii")
+        secinfo.seek(0)
+        if argv[2][(len(argv[2])-1):] != secinfoserial and not ignoreserialgiven:
+            await message.channel.send(f"Serials dont match! {argv[2][(len(argv[2])-1):]} not {secinfoserial}")
+            cleanup()
+            return
+        if ignoreserialgiven:
+            if validSerial(secinfoserial, False) == 2:
+                await message.channel.send(f"Blacklisted Serial number")
                 cleanup()
                 return
-            progress = "[ ]Generated JSON\n[ ]CheckReg Success\n[ ]EShopRegionChange\n[ ]SysTransfer"
-            progressmessage = await message.channel.send("[ ]Generated JSON\n[ ]CheckReg\n[ ]EShopRegionChange\n[ ]SysTransfer")
-            donorjson = open("console.json", "w")
-            SimpleCtrDevice.generate_new_json(otp_fp=otp, secureinfo_fp=secinfo, country=genjsoncountry, json_file="console.json")
-            otp.close()
-            secinfo.close()
-        else:
-            genjsoncountry = getCountry(argv[2][1]) 
-            if validSerial(argv[2], True) == 2:
-                await message.channel.send(f"blacklisted serial")
-                cleanup()
-                return
-            if validSerial(argv[2], True) == 1:
-                await message.channel.send(f'invalid serial: {argv[2]}')
-                return
-            progress = "[ ]Generated JSON\n[ ]CheckReg Success\n[ ]EShopRegionChange\n[ ]SysTransfer"
-            progressmessage = await message.channel.send("[ ]Generated JSON\n[ ]CheckReg\n[ ]EShopRegionChange\n[ ]SysTransfer")
-            donorjson = open("console.json", "w")
-            SimpleCtrDevice.generate_new_json(otp_fp=otp, serialnumber=argv[2], country=genjsoncountry, json_file="console.json")
-            otp.close()
-            
+        genjsoncountry = getCountry(argv[2][1])
+        if genjsoncountry == 0:
+            await message.channel.send(f"Unknown Serial number: {argv[2]}")
+            cleanup()
+            return
+        progress = "[ ]Generated JSON\n[ ]CheckReg Success\n[ ]EShopRegionChange\n[ ]SysTransfer"
+        progressmessage = await message.channel.send("[ ]Generated JSON\n[ ]CheckReg\n[ ]EShopRegionChange\n[ ]SysTransfer")
+        donorjson = open("console.json", "w")
+        SimpleCtrDevice.generate_new_json(otp_fp=otp, secureinfo_fp=secinfo, country=genjsoncountry, json_file="console.json")
+        otp.close()
+        secinfo.close()    
         progress.replace("[ ]G", "[S]G")
         await progressmessage.edit(progress)
-        checkregresult = CheckReg("console.json")
+        checkregresult = await CheckReg("console.json")
         if checkregresult[1] != "USA":
-            erchangeresult = EShopRegionChange("console.json", "USA", "US")
+            erchangeresult = await eshopRegionChange("console.json", "USA", "US")
         else:
-            erchangeresult = EShopRegionChange("console.json", "EUR", "GB")
+            erchangeresult = await eshopRegionChange("console.json", "EUR", "GB")
         if erchangeresult == 0:
             progress.replace("[ ]E", "[S]E")
             print("EShopRegionChange success!")
@@ -430,25 +422,25 @@ async def on_message(message):
         else:
             progress.replace("[ ]E", "[F]E")
             print(f"EShopRegionChange failure! Soap error code: {erchangeresult}")
-            cleanup()
             return
         thedonor = getReadyDonor()
-        confirmCountryMatch("console.json", thedonor)
-        systransferresult = _move_account("console.json", thedonor)
+        markAsBusy(thedonor)
+        await confirmCountryMatch("console.json", thedonor)
+        systransferresult = await _move_account("console.json", thedonor)
         if systransferresult == 0:
             progress.replace("[ ]S", "[S]S")
             print("SysTransfer success")
             await progressmessage.edit(progress)
             await message.channel.send("Done! Make sure that the country in System Settings -> Other Settings -> Profile is set to new region and country, then try eShop!")
-            cleanup()
         else:
             progress.replace("[ ]S", "[F]S")
             print("SysTransfer failure")
             await progressmessage.edit(progress)
-            cleanup()
+            await updateDonor(thedonor)
             return
-        updateDonor(thedonor)
+        await updateDonor(thedonor)
         return
     
 initDatabase()
-client.run("token here")
+with open("token.txt", "r") as token:
+    client.run(token.read())
